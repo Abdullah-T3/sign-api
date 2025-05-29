@@ -57,13 +57,21 @@ def predict_video_batch():
     video.save(filepath)
 
     cap = cv2.VideoCapture(filepath)
-    raw_predictions = []
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    video_duration = total_frames / fps if fps > 0 else 0
+    
+    raw_predictions_data = []
+    frame_count = 0
 
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
             break
 
+        current_time = frame_count / fps if fps > 0 else 0
+        frame_count += 1
+        
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         results = hands.process(rgb)
 
@@ -84,24 +92,84 @@ def predict_video_batch():
                     data_aux.append(0)
 
                 prediction = model.predict([np.asarray(data_aux)])
+                confidence = 0.95  # Placeholder for confidence (model doesn't provide it)
                 predicted_char = labels_dict[int(prediction[0])]
-                raw_predictions.append(predicted_char)
+                
+                raw_predictions_data.append({
+                    "gesture": predicted_char,
+                    "time": current_time,
+                    "confidence": confidence
+                })
 
     cap.release()
     os.remove(filepath)
     
-    # Remove consecutive duplicates
-    predictions = []
-    if raw_predictions:
-        predictions.append(raw_predictions[0])
-        for i in range(1, len(raw_predictions)):
-            if raw_predictions[i] != raw_predictions[i-1]:
-                predictions.append(raw_predictions[i])
+    # Process raw predictions to get gesture predictions with timing
+    gesture_predictions = []
+    raw_gestures = [pred["gesture"] for pred in raw_predictions_data]
     
-    # Option to return both raw and filtered predictions
+    if raw_predictions_data:
+        # Group consecutive identical gestures
+        current_gesture = raw_predictions_data[0]["gesture"]
+        start_time = raw_predictions_data[0]["time"]
+        gesture_counts = {current_gesture: 1}
+        
+        for i in range(1, len(raw_predictions_data)):
+            pred = raw_predictions_data[i]
+            
+            # Count occurrences for most common gesture
+            if pred["gesture"] in gesture_counts:
+                gesture_counts[pred["gesture"]] += 1
+            else:
+                gesture_counts[pred["gesture"]] = 1
+                
+            # If gesture changes, add the previous one to predictions
+            if pred["gesture"] != current_gesture:
+                end_time = pred["time"]
+                duration = end_time - start_time
+                
+                gesture_predictions.append({
+                    "gesture": current_gesture,
+                    "start_time": start_time,
+                    "end_time": end_time,
+                    "duration": duration
+                })
+                
+                # Start new gesture
+                current_gesture = pred["gesture"]
+                start_time = pred["time"]
+        
+        # Add the last gesture
+        if raw_predictions_data:
+            end_time = raw_predictions_data[-1]["time"]
+            duration = end_time - start_time
+            
+            gesture_predictions.append({
+                "gesture": current_gesture,
+                "start_time": start_time,
+                "end_time": end_time,
+                "duration": duration
+            })
+    
+    # Find most common gesture
+    most_common_gesture = ""
+    max_count = 0
+    if 'gesture_counts' in locals() and gesture_counts:
+        for gesture, count in gesture_counts.items():
+            if count > max_count:
+                max_count = count
+                most_common_gesture = gesture
+    
+    # Form text from predictions (simple concatenation for now)
+    formed_text = "".join([pred["gesture"] for pred in gesture_predictions])
+    
+    # Return data in the format expected by TranslationResponse
     return jsonify({
-        "predictions": predictions,
-        "raw_predictions": raw_predictions
+        "formed_text": formed_text,
+        "most_common_gesture": most_common_gesture,
+        "predictions": gesture_predictions,
+        "raw_predictions": raw_predictions_data,
+        "video_duration": video_duration
     })
 
 if __name__ == '__main__':
